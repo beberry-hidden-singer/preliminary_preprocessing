@@ -310,9 +310,9 @@ def main():
   print("1. Collecting input data..")
   data_by_speaker = dict()
   if os.path.isfile(args.input):
-    args.input, fname = os.path.split(args.input)
+    # args.input, fname = os.path.split(args.input)
     assert args.speaker is not None
-    data_by_speaker[args.speaker] = args.input
+    data_by_speaker[args.speaker] = [args.input]
   else:
     # a) for any wavs immediately under `args.input` dir, map them to `args.speaker`
     # b) for any wavs under sub-dir, the name of this sub-dir becomes the id/name of the speaker for these wavs
@@ -333,6 +333,7 @@ def main():
             continue
           cur_dict.append(os.path.join(fpath, fname))
   print(f"Found {len(data_by_speaker)} number of speaker(s)")
+  # print(data_by_speaker)
 
   print("2. Begin preprocessing..")
   sample_rate = args.sample_rate
