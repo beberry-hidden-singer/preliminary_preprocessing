@@ -3,6 +3,7 @@
 # Author: karljeon44
 # Date: 7/9/23 10:11 AM
 import argparse
+import json
 import logging
 import math
 import os
@@ -309,6 +310,7 @@ def main():
 
   print("1. Collecting input data..")
   data_by_speaker = dict()
+  speaker_mapping = dict()
   if os.path.isfile(args.input):
     # args.input, fname = os.path.split(args.input)
     assert args.speaker is not None
@@ -319,11 +321,23 @@ def main():
     for file_or_dir in tqdm.tqdm(os.listdir(args.input)):
       fpath = os.path.join(args.input, file_or_dir)
       if file_or_dir.endswith('.wav'):
-        assert args.speaker is not None, 'must provide speaker name'
-        if args.speaker in data_by_speaker:
-          data_by_speaker[args.speaker].append(fpath)
+        # assert args.speaker is not None, 'must provide speaker name'
+        if args.speaker is not None:
+          if args.speaker in data_by_speaker:
+            data_by_speaker[args.speaker].append(fpath)
+          else:
+            data_by_speaker[args.speaker] = [fpath]
         else:
-          data_by_speaker[args.speaker] = [fpath]
+          # automatically infer, using idx from 0, assuming GV dataset
+          spk_id = int(file_or_dir.split('_')[1])
+          if spk_id not in speaker_mapping:
+            speaker_mapping[spk_id] = str(len(speaker_mapping)+1) # start from 1, not 0
+
+          spk_id_map = speaker_mapping[spk_id]
+          if spk_id_map in data_by_speaker:
+            data_by_speaker[spk_id_map].append(fpath)
+          else:
+            data_by_speaker[spk_id_map] = [fpath]
 
       elif os.path.isdir(fpath):
         assert file_or_dir not in data_by_speaker, f'duplicate speaker name: `{file_or_dir}`'
@@ -348,7 +362,7 @@ def main():
     speaker_dirpath = os.path.join(args.output, speaker)
     os.makedirs(speaker_dirpath, exist_ok=True)
 
-    for wav_fpath in tqdm.tqdm(fpaths, desc=f'[{i+1}:{speaker}]'):
+    for wav_fpath in tqdm.tqdm(fpaths, desc=f'[{i+1}:`{speaker}`]'):
       # a) resample as mono
       audio, _ = librosa.load(wav_fpath, sr=sample_rate, mono=True)
 
@@ -385,6 +399,13 @@ def main():
             max_duration=args.max_duration,
           )
           os.remove(output_fpath)
+
+  # export speaker mapping, if it exists
+  if len(speaker_mapping) > 0:
+    spk_mapping_fpath = './spk_mapping_singer2idx.json'
+    print("Exporting Speaker mapping at", os.path.abspath(spk_mapping_fpath))
+    with open(spk_mapping_fpath, 'w') as f:
+      json.dump(speaker_mapping, f, indent=2)
 
   duration = time.time() - begin
   print(f"Execution Time: {int(duration//60)}m {duration%60:.2f}s")
