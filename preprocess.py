@@ -284,6 +284,90 @@ def slice_audio_file_v2(
       sf.write(str(output_dir / f"{input_fname}_{idx:04d}.wav"), sliced, rate)
 
 
+def preprocess(
+        wav_fpath,
+        sample_rate,
+        output_dirpath=None,
+        peak=-0.1,
+        block_size=0.400,
+        loudness=-23.,
+        min_duration=5.0,
+        abs_min_duration=2.0,
+        max_duration=15.0,
+        do_normalize=False,
+        do_augment=False,
+        do_slice=False
+):
+  assert wav_fpath.endswith('.wav'), 'currently only supports .wav files'
+  wav_fname = os.path.basename(wav_fpath)
+
+  sample_rate_str = sample_rate
+  if isinstance(sample_rate, int):
+    sample_rate = str(sample_rate)
+  if sample_rate.startswith('48'):
+    sample_rate = 48000
+    sample_rate_str = '48k'
+  elif sample_rate.startswith('44'):
+    sample_rate = 44100
+    sample_rate_str = '44.1k'
+  elif sample_rate.startswith('40'):
+    sample_rate = 40000
+    sample_rate_str = '40k'
+  else:
+    sample_rate = 32000
+    sample_rate_str = '32k'
+  assert isinstance(sample_rate, int)
+
+  # a) resample as mono
+  audio, _ = librosa.load(wav_fpath, sr=sample_rate, mono=True)
+  wav_fname = wav_fname.replace('.wav', f'_{sample_rate_str}.wav')
+
+  # b) (optional) loudness normalization
+  if do_normalize:
+    # peak normalize audio to [peak] dB
+    audio = pyln.normalize.peak(audio, peak)
+
+    # measure the loudness first
+    meter = pyln.Meter(sample_rate, block_size=block_size)  # creates BS.1770 meter
+    _loudness = meter.integrated_loudness(audio)
+
+    audio = pyln.normalize.loudness(audio, _loudness, loudness)
+
+    wav_fname = wav_fname.replace('.wav', '_norm.wav')
+
+  # maybe export
+  do_export = output_dirpath is not None
+
+  output_fpath, output_fpaths = None, []
+  if do_export:
+    output_fpath = os.path.join(output_dirpath, wav_fname)
+    sf.write(output_fpath, audio, sample_rate)
+    output_fpaths = [output_fpath]
+
+  # c) (optional) augmentation
+  if do_augment:
+    assert do_export
+    waveform_shift = torchaudio.functional.pitch_shift(torch.from_numpy(audio), sample_rate,
+                                                       n_steps=random.choice([-5.0, 5.0]))
+    output_aug_fpath = output_fpath.replace('.wav', '_aug.wav')
+    sf.write(output_aug_fpath, waveform_shift.numpy(), sample_rate)
+    output_fpaths.append(output_aug_fpath)
+
+  # d) (optional) slicing, the already exported files above will be removed after being sliced
+  if do_slice:
+    assert do_export
+    for output_fpath in output_fpaths:
+      slice_audio_file_v2(
+        input_file=output_fpath,
+        min_duration=min_duration,
+        abs_min_duration=abs_min_duration,
+        max_duration=max_duration,
+      )
+      os.remove(output_fpath)
+
+  return audio, output_fpaths
+
+
 def main():
   # 0. setup
   begin = time.time()
@@ -350,55 +434,25 @@ def main():
   # print(data_by_speaker)
 
   print("2. Begin preprocessing..")
-  sample_rate = args.sample_rate
-  if sample_rate.startswith('48'):
-    sample_rate = 48000
-  elif sample_rate.startswith('44'):
-    sample_rate = 44100
-  else:
-    sample_rate = 40000
-
   for i, (speaker, fpaths) in enumerate(data_by_speaker.items()):
     speaker_dirpath = os.path.join(args.output, speaker)
     os.makedirs(speaker_dirpath, exist_ok=True)
 
     for wav_fpath in tqdm.tqdm(fpaths, desc=f'[{i+1}:`{speaker}`]'):
-      # a) resample as mono
-      audio, _ = librosa.load(wav_fpath, sr=sample_rate, mono=True)
-
-      # b) (optional) loudness normalization
-      if args.normalize:
-        # peak normalize audio to [peak] dB
-        audio = pyln.normalize.peak(audio, args.peak)
-
-        # measure the loudness first
-        meter = pyln.Meter(sample_rate, block_size=args.block_size)  # creates BS.1770 meter
-        _loudness = meter.integrated_loudness(audio)
-
-        audio = pyln.normalize.loudness(audio, _loudness, args.loudness)
-
-      # export
-      output_fpath = os.path.join(speaker_dirpath, os.path.basename(wav_fpath))
-      sf.write(output_fpath, audio, sample_rate)
-      output_fpaths = [output_fpath]
-
-      # c) (optional) augmentation
-      if args.augment:
-        waveform_shift = torchaudio.functional.pitch_shift(torch.from_numpy(audio), sample_rate, n_steps=random.choice([-5.0, 5.0]))
-        output_aug_fpath = output_fpath.replace('.wav', '_aug.wav')
-        sf.write(output_aug_fpath, waveform_shift.numpy(), sample_rate)
-        output_fpaths.append(output_aug_fpath)
-
-      # d) (optional) slicing, the already exported files above will be removed after being sliced
-      if args.slice:
-        for output_fpath in output_fpaths:
-          slice_audio_file_v2(
-            input_file=output_fpath,
-            min_duration=args.min_duration,
-            abs_min_duration=args.abs_min_duration,
-            max_duration=args.max_duration,
-          )
-          os.remove(output_fpath)
+      preprocess(
+        wav_fpath,
+        sample_rate=args.sample_rate,
+        output_dirpath=speaker_dirpath,
+        peak=args.peak,
+        block_size=args.block_size,
+        loudness=args.loudness,
+        min_duration=args.min_duration,
+        abs_min_duration=args.abs_min_duration,
+        max_duration=args.max_duration,
+        do_normalize=args.normalize,
+        do_augment=args.augment,
+        do_slice=args.slice
+      )
 
   # export speaker mapping, if it exists
   if len(speaker_mapping) > 0:
