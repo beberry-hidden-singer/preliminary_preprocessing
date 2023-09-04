@@ -313,9 +313,11 @@ def preprocess(
   elif sample_rate.startswith('40'):
     sample_rate = 40000
     sample_rate_str = '40k'
-  else:
+  elif sample_rate.startswith('32'):
     sample_rate = 32000
     sample_rate_str = '32k'
+  else:
+    raise ValueError(f'Provided sample rate (`{sample_rate}`) is not valid')
   assert isinstance(sample_rate, int)
 
   # a) resample as mono
