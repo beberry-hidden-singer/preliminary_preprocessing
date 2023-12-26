@@ -10,11 +10,12 @@ import os
 import random
 import shutil
 import time
+from functools import partial
+from multiprocessing import Pool
 from pathlib import Path
 
 import librosa
 import numpy as np
-import pyloudnorm as pyln
 import soundfile as sf
 import torch
 import torchaudio
@@ -27,7 +28,8 @@ argparser.add_argument('-i', '--input', default='../DATA', help='path to input f
 argparser.add_argument('-o', '--output', help='path to output dir (default: same dir as input)')
 argparser.add_argument('-s', '--speaker', help='name/id of the speaker; not needed if the input dir has speaker id or name as sub-dir name')
 argparser.add_argument('-sr', '--sample_rate', type=str.lower, default='44.1k', help='target sampling rate | Default: `44.1k`',
-                       choices=['40', '40k', '40000', '44.1', '44.1k', '44100', '48', '48k', '48000'])
+                       choices=['32', '32k', '32000', '40', '40k', '40000', '44.1', '44.1k', '44100', '48', '48k', '48000'])
+argparser.add_argument('-j', '--num_workers', type=int, default=8, help='number of processes to use for preprocessing')
 argparser.add_argument('--normalize', action='store_true', help='whether to apply loudness normalization (ITU-R BS.1770-4)')
 argparser.add_argument('-p', '--peak', type=float, default=-1.0, help='peak normalize audio to N dB | Default: `-1.0 dB`')
 argparser.add_argument('-l', '--loudness', type=float, default=-23.0, help='loudness normalize audio to N dB LUFS | Default: `-23.0 dB`')
@@ -301,7 +303,6 @@ def preprocess(
   assert wav_fpath.endswith('.wav'), 'currently only supports .wav files'
   wav_fname = os.path.basename(wav_fpath)
 
-  sample_rate_str = sample_rate
   if isinstance(sample_rate, int):
     sample_rate = str(sample_rate)
   if sample_rate.startswith('48'):
@@ -326,6 +327,8 @@ def preprocess(
 
   # b) (optional) loudness normalization
   if do_normalize:
+    import pyloudnorm as pyln
+
     # peak normalize audio to [peak] dB
     audio = pyln.normalize.peak(audio, peak)
 
@@ -349,8 +352,7 @@ def preprocess(
   # c) (optional) augmentation
   if do_augment:
     assert do_export
-    waveform_shift = torchaudio.functional.pitch_shift(torch.from_numpy(audio), sample_rate,
-                                                       n_steps=random.choice([-5.0, 5.0]))
+    waveform_shift = torchaudio.functional.pitch_shift(torch.from_numpy(audio), sample_rate, n_steps=random.choice([-5.0, 5.0]))
     output_aug_fpath = output_fpath.replace('.wav', '_aug.wav')
     sf.write(output_aug_fpath, waveform_shift.numpy(), sample_rate)
     output_fpaths.append(output_aug_fpath)
@@ -368,6 +370,17 @@ def preprocess(
       os.remove(output_fpath)
 
   return audio, output_fpaths
+
+
+def preprocess_dir(tup_data, output_dir, preprocess_fn):
+  speaker, fpaths = tup_data
+  print(f"Preprocessing Speaker {speaker}", flush=True)
+
+  speaker_dirpath = os.path.join(output_dir, speaker)
+  os.makedirs(speaker_dirpath, exist_ok=True)
+
+  for wav_fpath in fpaths:
+    preprocess_fn(wav_fpath,output_dirpath=speaker_dirpath)
 
 
 def main():
@@ -401,6 +414,7 @@ def main():
     # args.input, fname = os.path.split(args.input)
     assert args.speaker is not None
     data_by_speaker[args.speaker] = [args.input]
+
   else:
     # a) for any wavs immediately under `args.input` dir, map them to `args.speaker`
     # b) for any wavs under sub-dir, the name of this sub-dir becomes the id/name of the speaker for these wavs
@@ -414,10 +428,13 @@ def main():
           else:
             data_by_speaker[args.speaker] = [fpath]
         else:
-          # automatically infer, using idx from 0, assuming GV dataset
+          # automatically infer, using idx from 0, assuming GV dataset (e.g. BEBE_00_.., SINGER_01_.., USN_92_.., etc)
           spk_id = int(file_or_dir.split('_')[1])
           if spk_id not in speaker_mapping:
-            speaker_mapping[spk_id] = str(len(speaker_mapping)+1) # start from 1, not 0
+            # speaker_mapping[spk_id] = str(len(speaker_mapping)+1) # start from 1, not 0
+            # spk_map = str(len(speaker_mapping)+1) # start from 1, not 0
+            speaker_mapping[spk_id] = spk_map = str(spk_id+1) # start from 1, not 0
+            print(f"Mapping Speaker `{spk_id}` to `{spk_map}`")
 
           spk_id_map = speaker_mapping[spk_id]
           if spk_id_map in data_by_speaker:
@@ -433,32 +450,27 @@ def main():
             continue
           cur_dict.append(os.path.join(fpath, fname))
   print(f"Found {len(data_by_speaker)} number of speaker(s)")
-  # print(data_by_speaker)
 
   print("2. Begin preprocessing..")
-  for i, (speaker, fpaths) in enumerate(data_by_speaker.items()):
-    speaker_dirpath = os.path.join(args.output, speaker)
-    os.makedirs(speaker_dirpath, exist_ok=True)
-
-    for wav_fpath in tqdm.tqdm(fpaths, desc=f'[{i+1}:`{speaker}`]'):
-      preprocess(
-        wav_fpath,
-        sample_rate=args.sample_rate,
-        output_dirpath=speaker_dirpath,
-        peak=args.peak,
-        block_size=args.block_size,
-        loudness=args.loudness,
-        min_duration=args.min_duration,
-        abs_min_duration=args.abs_min_duration,
-        max_duration=args.max_duration,
-        do_normalize=args.normalize,
-        do_augment=args.augment,
-        do_slice=args.slice
-      )
+  with Pool(processes=args.num_workers) as pool:
+    preprocess_fn = partial(
+      preprocess,
+      sample_rate=args.sample_rate,
+      peak=args.peak,
+      block_size=args.block_size,
+      loudness=args.loudness,
+      min_duration=args.min_duration,
+      abs_min_duration=args.abs_min_duration,
+      max_duration=args.max_duration,
+      do_normalize=args.normalize,
+      do_augment=args.augment,
+      do_slice=args.slice
+    )
+    pool.map(partial(preprocess_dir, output_dir=args.output, preprocess_fn=preprocess_fn), list(data_by_speaker.items()))
 
   # export speaker mapping, if it exists
   if len(speaker_mapping) > 0:
-    spk_mapping_fpath = './spk_mapping_singer2idx.json'
+    spk_mapping_fpath = './spk2idx.json'
     print("Exporting Speaker mapping at", os.path.abspath(spk_mapping_fpath))
     with open(spk_mapping_fpath, 'w') as f:
       json.dump(speaker_mapping, f, indent=2)
